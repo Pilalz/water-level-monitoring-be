@@ -1,0 +1,84 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Modul {
+  id         String   @id @default(uuid())
+  kodeIot    String   @unique @map("kode_iot") @db.VarChar(10)
+  nama       String   @db.VarChar(100)
+  lokasi     String?  @db.VarChar(255)
+  keterangan String?  @db.Text
+  status     String   @default("AKTIF") @db.VarChar(20) // AKTIF, MAINTENANCE, RUSAK
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  zonas Zona[]
+
+  @@map("modul")
+}
+
+model Zona {
+  id            String   @id @default(uuid())
+  idModul       String   @map("id_modul")
+  kodeZona      String   @unique @map("kode_zona") @db.VarChar(10)
+  namaZona      String   @map("nama_zona") @db.VarChar(100)
+  
+  tinggiMaks    Decimal  @map("tinggi_maks") @db.Decimal(8, 2)
+  voltMin       Decimal? @map("volt_min") @db.Decimal(8, 2)
+  voltMaks      Decimal? @map("volt_maks") @db.Decimal(8, 2)
+  satuan        String   @default("cm") @db.VarChar(10)
+  
+  batasWaspada  Decimal  @map("batas_waspada") @db.Decimal(8, 2)
+  batasBahaya   Decimal  @map("batas_bahaya") @db.Decimal(8, 2)
+  batasKritis   Decimal  @map("batas_kritis") @db.Decimal(8, 2)
+  
+  status        String   @default("AKTIF") @db.VarChar(20)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  // Definisi Relasi
+  modul         Modul        @relation(fields: [idModul], references: [id], onDelete: Cascade)
+  sensorData    SensorData[]
+  alertLogs     AlertLog[]
+
+  @@map("zona")
+}
+
+model SensorData {
+  id             BigInt   @id @default(autoincrement())
+  idZona         String   @map("id_zona")
+  
+  ketinggianAir  Decimal  @map("ketinggian_air") @db.Decimal(8, 2)
+  voltaseRaw     Decimal? @map("voltase_raw") @db.Decimal(8, 2)
+  
+  statusTercatat String   @map("status_tercatat") @db.VarChar(20) // AMAN, WASPADA, BAHAYA, KRITIS
+  waktuRekam     DateTime @default(now()) @map("waktu_rekam")
+
+  // Definisi Relasi
+  zona           Zona     @relation(fields: [idZona], references: [id], onDelete: Cascade)
+
+  @@index([waktuRekam])
+  @@map("sensor_data")
+}
+
+model AlertLog {
+  id             BigInt   @id @default(autoincrement())
+  idZona         String   @map("id_zona")
+  
+  levelStatus    String   @map("level_status") @db.VarChar(20) // WASPADA, BAHAYA, KRITIS
+  pesanAlert     String   @map("pesan_alert") @db.Text
+  isResolved     Boolean  @default(false) @map("is_resolved")
+  waktuAlert     DateTime @default(now()) @map("waktu_alert")
+
+  // Definisi Relasi
+  zona           Zona     @relation(fields: [idZona], references: [id], onDelete: Cascade)
+
+  @@index([waktuAlert])
+  @@index([isResolved])
+  @@map("alert_log")
+}
