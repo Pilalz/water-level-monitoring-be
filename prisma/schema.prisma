@@ -7,45 +7,55 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+enum Role {
+  VIEWER
+  OPERATOR
+  ADMIN
+}
+
 model Modul {
-  id         String   @id @default(uuid())
-  kodeIot    String   @unique @map("kode_iot") @db.VarChar(10)
-  nama       String   @db.VarChar(100)
-  lokasi     String?  @db.VarChar(255)
-  keterangan String?  @db.Text
-  status     String   @default("AKTIF") @db.VarChar(20) // AKTIF, MAINTENANCE, RUSAK
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  id         String    @id @default(uuid())
+  kodeIot    String    @unique @map("kode_iot") @db.VarChar(10)
+  nama       String    @db.VarChar(100)
+  lokasi     String?   @db.VarChar(255)
+  keterangan String?   @db.Text
+  status     String    @default("AKTIF") @db.VarChar(20) // AKTIF, MAINTENANCE, RUSAK
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  deletedAt  DateTime? @map("deleted_at")
 
   zonas Zona[]
 
+  @@index([deletedAt])
   @@map("modul")
 }
 
 model Zona {
-  id            String   @id @default(uuid())
-  idModul       String   @map("id_modul")
-  kodeZona      String   @unique @map("kode_zona") @db.VarChar(10)
-  namaZona      String   @map("nama_zona") @db.VarChar(100)
+  id            String    @id @default(uuid())
+  idModul       String    @map("id_modul")
+  kodeZona      String    @unique @map("kode_zona") @db.VarChar(10)
+  namaZona      String    @map("nama_zona") @db.VarChar(100)
   
-  tinggiMaks    Decimal  @map("tinggi_maks") @db.Decimal(8, 2)
-  voltMin       Decimal? @map("volt_min") @db.Decimal(8, 2)
-  voltMaks      Decimal? @map("volt_maks") @db.Decimal(8, 2)
-  satuan        String   @default("cm") @db.VarChar(10)
+  tinggiMaks    Decimal   @map("tinggi_maks") @db.Decimal(8, 2)
+  voltMin       Decimal?  @map("volt_min") @db.Decimal(8, 2)
+  voltMaks      Decimal?  @map("volt_maks") @db.Decimal(8, 2)
+  satuan        String    @default("cm") @db.VarChar(10)
   
-  batasWaspada  Decimal  @map("batas_waspada") @db.Decimal(8, 2)
-  batasBahaya   Decimal  @map("batas_bahaya") @db.Decimal(8, 2)
-  batasKritis   Decimal  @map("batas_kritis") @db.Decimal(8, 2)
+  batasWaspada  Decimal   @map("batas_waspada") @db.Decimal(8, 2)
+  batasBahaya   Decimal   @map("batas_bahaya") @db.Decimal(8, 2)
+  batasKritis   Decimal   @map("batas_kritis") @db.Decimal(8, 2)
   
-  status        String   @default("AKTIF") @db.VarChar(20)
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  status        String    @default("AKTIF") @db.VarChar(20)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  deletedAt     DateTime? @map("deleted_at")
 
   // Definisi Relasi
   modul         Modul        @relation(fields: [idModul], references: [id], onDelete: Cascade)
   sensorData    SensorData[]
   alertLogs     AlertLog[]
 
+  @@index([deletedAt])
   @@map("zona")
 }
 
@@ -58,11 +68,13 @@ model SensorData {
   
   statusTercatat String   @map("status_tercatat") @db.VarChar(20) // AMAN, WASPADA, BAHAYA, KRITIS
   waktuRekam     DateTime @default(now()) @map("waktu_rekam")
+  waktuTerima    DateTime @default(now()) @map("waktu_terima")
 
   // Definisi Relasi
   zona           Zona     @relation(fields: [idZona], references: [id], onDelete: Cascade)
 
   @@index([waktuRekam])
+  @@index([waktuTerima])
   @@map("sensor_data")
 }
 
@@ -81,4 +93,37 @@ model AlertLog {
   @@index([waktuAlert])
   @@index([isResolved])
   @@map("alert_log")
+}
+
+model User {
+  id           String        @id @default(uuid())
+  username     String        @unique
+  password     String   
+  role         Role          @default(VIEWER)
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  deletedAt    DateTime?     @map("deleted_at")
+
+  activityLogs ActivityLog[]
+
+  @@index([deletedAt])
+  @@map("user")
+}
+
+model ActivityLog {
+  id        BigInt   @id @default(autoincrement())
+  userId    String?  @map("user_id")
+  username  String?  @db.VarChar(100)
+  action    String   @db.VarChar(50)  // CREATE, UPDATE, DELETE, RESTORE, RESOLVE, LOGIN
+  entity    String   @db.VarChar(50)  // MODUL, ZONA, USER, ALERT, AUTH
+  entityId  String?  @map("entity_id")
+  details   String?  @db.Text
+  createdAt DateTime @default(now())  @map("created_at")
+
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([createdAt])
+  @@index([entity])
+  @@index([action])
+  @@map("activity_log")
 }

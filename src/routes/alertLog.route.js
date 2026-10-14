@@ -5,11 +5,14 @@ const {
   resolveAlert,
   getAlertSummary,
 } = require("../controllers/alertLog.controller");
+const { verifyToken, authorizeRoles } = require("../middlewares/auth");
 
 const router = Router();
 
-router.get("/summary", getAlertSummary);
-router.get("/", getAllAlerts);
-router.patch("/:id/resolve", resolveAlert);
+router.use(verifyToken);
+
+router.get("/summary", authorizeRoles("ADMIN", "OPERATOR", "VIEWER"), getAlertSummary);
+router.get("/", authorizeRoles("ADMIN", "OPERATOR", "VIEWER"), getAllAlerts);
+router.patch("/:id/resolve", authorizeRoles("ADMIN", "OPERATOR"), resolveAlert);
 
 module.exports = router;

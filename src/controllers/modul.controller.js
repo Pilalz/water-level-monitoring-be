@@ -1,10 +1,11 @@
 // src/controllers/modul.controller.js
 const prisma = require("../lib/prisma");
+const { logActivity } = require("../lib/activityLogger");
 
 // Helper hitung status koneksi telemetri per zona
-const calculateZonaStatus = (waktuRekam) => {
-  if (!waktuRekam) return { status: "OFFLINE", diffSeconds: null };
-  const diffSeconds = Math.max(0, Math.floor((Date.now() - new Date(waktuRekam).getTime()) / 1000));
+const calculateZonaStatus = (waktuTerima) => {
+  if (!waktuTerima) return { status: "OFFLINE", diffSeconds: null };
+  const diffSeconds = Math.max(0, Math.floor((Date.now() - new Date(waktuTerima).getTime()) / 1000));
   if (diffSeconds <= 120) return { status: "ONLINE", diffSeconds };
   if (diffSeconds <= 500) return { status: "DELAYED", diffSeconds };
   return { status: "OFFLINE", diffSeconds };
@@ -28,20 +29,27 @@ const calculateModulStatus = (zonaStatuses) => {
  */
 const getAllModul = async (req, res, next) => {
   try {
-    const { status, includeZonas } = req.query;
+    const { status, includeZonas, includeDeleted } = req.query;
+
+    const where = {};
+    if (includeDeleted !== "true") {
+      where.deletedAt = null;
+    }
 
     const modulList = await prisma.modul.findMany({
+      where,
       include: {
         zonas: {
+          where: { deletedAt: null },
           include: {
             sensorData: {
-              orderBy: { waktuRekam: "desc" },
+              orderBy: { waktuTerima: "desc" },
               take: 1,
             },
           },
         },
         _count: {
-          select: { zonas: true },
+          select: { zonas: { where: { deletedAt: null } } },
         },
       },
       orderBy: { createdAt: "desc" },
@@ -50,7 +58,7 @@ const getAllModul = async (req, res, next) => {
     let formatted = modulList.map((m) => {
       const zonasFormatted = (m.zonas || []).map((z) => {
         const latestReading = z.sensorData?.[0] || null;
-        const { status: zonaStatus, diffSeconds } = calculateZonaStatus(latestReading?.waktuRekam);
+        const { status: zonaStatus, diffSeconds } = calculateZonaStatus(latestReading?.waktuTerima);
         return {
           ...z,
           status: zonaStatus,
@@ -100,7 +108,7 @@ const getModulById = async (req, res, next) => {
         zonas: {
           include: {
             sensorData: {
-              orderBy: { waktuRekam: "desc" },
+              orderBy: { waktuTerima: "desc" },
               take: 1,
             },
           },
@@ -117,7 +125,7 @@ const getModulById = async (req, res, next) => {
 
     const zonasFormatted = (modul.zonas || []).map((z) => {
       const latestReading = z.sensorData?.[0] || null;
-      const { status: zonaStatus, diffSeconds } = calculateZonaStatus(latestReading?.waktuRekam);
+      const { status: zonaStatus, diffSeconds } = calculateZonaStatus(latestReading?.waktuTerima);
       return {
         ...z,
         status: zonaStatus,
@@ -190,6 +198,14 @@ const createModul = async (req, res, next) => {
       },
     });
 
+    await logActivity({
+      req,
+      action: "CREATE",
+      entity: "MODUL",
+      entityId: newModul.id,
+      details: `Modul '${newModul.nama}' (${newModul.kodeIot}) berhasil dibuat`,
+    });
+
     res.status(201).json({
       success: true,
       message: "Modul berhasil dibuat",
@@ -253,6 +269,14 @@ const updateModul = async (req, res, next) => {
       data: updatedData,
     });
 
+    await logActivity({
+      req,
+      action: "UPDATE",
+      entity: "MODUL",
+      entityId: updated.id,
+      details: `Modul '${updated.nama}' (${updated.kodeIot}) diperbarui`,
+    });
+
     res.status(200).json({
       success: true,
       message: "Modul berhasil diupdate",
@@ -265,7 +289,7 @@ const updateModul = async (req, res, next) => {
 
 /**
  * DELETE /api/modul/:id
- * Menghapus modul (cascade menghapus zona terkait)
+ * Soft-delete modul (memeriksa apakah ada zona aktif di bawahnya)
  */
 const deleteModul = async (req, res, next) => {
   try {
@@ -279,11 +303,78 @@ const deleteModul = async (req, res, next) => {
       });
     }
 
-    await prisma.modul.delete({ where: { id } });
+    // Validasi: Cek apakah modul masih memiliki zona sensor yang aktif (belum di-soft-delete)
+    const activeZonas = await prisma.zona.count({
+      where: {
+        idModul: id,
+        deletedAt: null,
+      },
+    });
+
+    if (activeZonas > 0) {
+      return res.status(400).json({
+        success: false,
+        message: `Modul '${existing.nama}' (${existing.kodeIot}) tidak dapat dihapus karena masih memiliki ${activeZonas} zona sensor aktif. Silakan hapus/soft-delete semua zona di bawah modul ini terlebih dahulu.`,
+      });
+    }
+
+    // Lakukan soft-delete
+    const deleted = await prisma.modul.update({
+      where: { id },
+      data: { deletedAt: new Date() },
+    });
+
+    await logActivity({
+      req,
+      action: "DELETE",
+      entity: "MODUL",
+      entityId: id,
+      details: `Modul '${existing.nama}' (${existing.kodeIot}) di-soft-delete`,
+    });
 
     res.status(200).json({
       success: true,
-      message: `Modul '${existing.nama}' (${id}) beserta zona terkait berhasil dihapus`,
+      message: `Modul '${existing.nama}' (${existing.kodeIot}) berhasil dihapus (soft delete)`,
+      data: deleted,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * PATCH /api/modul/:id/restore
+ * Memulihkan modul yang di-soft-delete
+ */
+const restoreModul = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+
+    const existing = await prisma.modul.findUnique({ where: { id } });
+    if (!existing) {
+      return res.status(404).json({
+        success: false,
+        message: `Modul dengan ID '${id}' tidak ditemukan`,
+      });
+    }
+
+    const restored = await prisma.modul.update({
+      where: { id },
+      data: { deletedAt: null },
+    });
+
+    await logActivity({
+      req,
+      action: "RESTORE",
+      entity: "MODUL",
+      entityId: id,
+      details: `Modul '${existing.nama}' (${existing.kodeIot}) dipulihkan (restore)`,
+    });
+
+    res.status(200).json({
+      success: true,
+      message: `Modul '${existing.nama}' (${existing.kodeIot}) berhasil dipulihkan`,
+      data: restored,
     });
   } catch (error) {
     next(error);
@@ -296,4 +387,5 @@ module.exports = {
   createModul,
   updateModul,
   deleteModul,
+  restoreModul,
 };

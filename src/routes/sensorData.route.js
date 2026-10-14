@@ -5,13 +5,25 @@ const {
   getSensorData,
   getLatestSensorData,
 } = require("../controllers/sensorData.controller");
+const { verifyToken, authorizeRoles } = require("../middlewares/auth");
 
 const router = Router();
 
-router.get("/latest", getLatestSensorData);
+// Endpoint baca data diproteksi RBAC (Dashboard viewer/operator/admin)
+router.get(
+  "/latest",
+  verifyToken,
+  authorizeRoles("ADMIN", "OPERATOR", "VIEWER"),
+  getLatestSensorData
+);
 
 router.route("/")
-  .get(getSensorData)
+  .get(
+    verifyToken,
+    authorizeRoles("ADMIN", "OPERATOR", "VIEWER"),
+    getSensorData
+  )
+  // POST terbuka untuk ingestion data sensor dari simulator (datadummy.py) / modul IoT
   .post(recordSensorData);
 
 module.exports = router;

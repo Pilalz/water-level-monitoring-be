@@ -1,26 +1,68 @@
 // src/controllers/zona.controller.js
 const prisma = require("../lib/prisma");
+const { logActivity } = require("../lib/activityLogger");
+
+// Helper hitung status koneksi telemetri IoT per zona
+const calculateConnectionStatus = (waktuTerima) => {
+  if (!waktuTerima) {
+    return { statusKoneksi: "OFFLINE", diffSeconds: null };
+  }
+  const diffSeconds = Math.max(0, Math.floor((Date.now() - new Date(waktuTerima).getTime()) / 1000));
+  let statusKoneksi = "OFFLINE";
+  if (diffSeconds <= 120) {
+    statusKoneksi = "ONLINE";
+  } else if (diffSeconds <= 500) {
+    statusKoneksi = "DELAYED";
+  } else {
+    statusKoneksi = "OFFLINE";
+  }
+  return { statusKoneksi, diffSeconds };
+};
+
+// Helper agregasi status modul dari anak-anak zonanya
+const calculateModulStatus = (zonaStatuses) => {
+  if (!zonaStatuses || zonaStatuses.length === 0) return "OFFLINE";
+  const total = zonaStatuses.length;
+  const onlineCount = zonaStatuses.filter((s) => s === "ONLINE").length;
+  const offlineCount = zonaStatuses.filter((s) => s === "OFFLINE").length;
+
+  if (onlineCount === total) return "ONLINE"; // Semua zona online
+  if (offlineCount === total) return "OFFLINE"; // Semua zona offline
+  return "DELAYED"; // Campuran (sebagian online, sebagian delayed/offline)
+};
 
 /**
  * GET /api/zona
- * Mengambil semua zona, opsional filter berdasarkan idModul atau status
+ * Mengambil semua zona, status otomatis dihitung (ONLINE, DELAYED, OFFLINE)
+ * Query: includeDeleted=true untuk menampilkan yang sudah di-soft-delete
  */
 const getAllZona = async (req, res, next) => {
   try {
-    const { idModul, status } = req.query;
+    const { idModul, status, includeDeleted } = req.query;
 
     const where = {};
     if (idModul) where.idModul = idModul;
-    if (status) where.status = String(status).toUpperCase();
+    if (includeDeleted !== "true") {
+      where.deletedAt = null;
+    }
 
     const zonas = await prisma.zona.findMany({
       where,
       include: {
         modul: {
-          select: { id: true, kodeIot: true, nama: true, lokasi: true, status: true },
+          include: {
+            zonas: {
+              include: {
+                sensorData: {
+                  orderBy: { waktuTerima: "desc" },
+                  take: 1,
+                },
+              },
+            },
+          },
         },
         sensorData: {
-          orderBy: { waktuRekam: "desc" },
+          orderBy: { waktuTerima: "desc" },
           take: 1, // Pembacaan terakhir
         },
         _count: {
@@ -34,36 +76,40 @@ const getAllZona = async (req, res, next) => {
       orderBy: { createdAt: "desc" },
     });
 
-    // Helper hitung status koneksi telemetri IoT
-    const calculateConnectionStatus = (waktuRekam) => {
-      if (!waktuRekam) {
-        return { statusKoneksi: "OFFLINE", diffSeconds: null };
-      }
-      const diffSeconds = Math.max(0, Math.floor((Date.now() - new Date(waktuRekam).getTime()) / 1000));
-      let statusKoneksi = "OFFLINE";
-      if (diffSeconds <= 120) {
-        statusKoneksi = "ONLINE";
-      } else if (diffSeconds <= 500) {
-        statusKoneksi = "DELAYED";
-      } else {
-        statusKoneksi = "OFFLINE";
-      }
-      return { statusKoneksi, diffSeconds };
-    };
-
-    // Format response agar pembacaan sensor terbaru mudah diakses
-    const formatted = zonas.map((z) => {
+    // Format response dengan status koneksi dinamis menggantikan status statis
+    let formatted = zonas.map((z) => {
       const latestReading = z.sensorData[0] || null;
-      const conn = calculateConnectionStatus(latestReading?.waktuRekam);
+      const conn = calculateConnectionStatus(latestReading?.waktuTerima);
+
+      // Hitung status modul induk dari seluruh zona miliknya
+      const modulZonaStatuses = (z.modul?.zonas || []).map((mZ) => {
+        const mr = mZ.sensorData?.[0] || null;
+        return calculateConnectionStatus(mr?.waktuTerima).statusKoneksi;
+      });
+      const modulStatus = calculateModulStatus(modulZonaStatuses);
 
       return {
         ...z,
-        latestReading,
+        status: conn.statusKoneksi, // Menggantikan status di table zona
         statusKoneksi: conn.statusKoneksi,
         diffSeconds: conn.diffSeconds,
+        latestReading,
         unresolvedAlertsCount: z._count.alertLogs,
+        modul: z.modul
+          ? {
+              id: z.modul.id,
+              kodeIot: z.modul.kodeIot,
+              nama: z.modul.nama,
+              lokasi: z.modul.lokasi,
+              status: modulStatus, // Menggantikan status di table modul
+            }
+          : null,
       };
     });
+
+    if (status && status !== "ALL") {
+      formatted = formatted.filter((z) => z.status === String(status).toUpperCase());
+    }
 
     res.status(200).json({
       success: true,
@@ -86,9 +132,20 @@ const getZonaById = async (req, res, next) => {
     const zona = await prisma.zona.findUnique({
       where: { id },
       include: {
-        modul: true,
+        modul: {
+          include: {
+            zonas: {
+              include: {
+                sensorData: {
+                  orderBy: { waktuTerima: "desc" },
+                  take: 1,
+                },
+              },
+            },
+          },
+        },
         sensorData: {
-          orderBy: { waktuRekam: "desc" },
+          orderBy: { waktuTerima: "desc" },
           take: 20,
         },
         alertLogs: {
@@ -107,27 +164,31 @@ const getZonaById = async (req, res, next) => {
     }
 
     const latestReading = zona.sensorData[0] || null;
-    let statusKoneksi = "OFFLINE";
-    let diffSeconds = null;
+    const conn = calculateConnectionStatus(latestReading?.waktuTerima);
 
-    if (latestReading && latestReading.waktuRekam) {
-      diffSeconds = Math.max(0, Math.floor((Date.now() - new Date(latestReading.waktuRekam).getTime()) / 1000));
-      if (diffSeconds <= 120) {
-        statusKoneksi = "ONLINE";
-      } else if (diffSeconds <= 500) {
-        statusKoneksi = "DELAYED";
-      } else {
-        statusKoneksi = "OFFLINE";
-      }
-    }
+    const modulZonaStatuses = (zona.modul?.zonas || []).map((mZ) => {
+      const mr = mZ.sensorData?.[0] || null;
+      return calculateConnectionStatus(mr?.waktuTerima).statusKoneksi;
+    });
+    const modulStatus = calculateModulStatus(modulZonaStatuses);
 
     res.status(200).json({
       success: true,
       data: {
         ...zona,
+        status: conn.statusKoneksi,
+        statusKoneksi: conn.statusKoneksi,
+        diffSeconds: conn.diffSeconds,
         latestReading,
-        statusKoneksi,
-        diffSeconds,
+        modul: zona.modul
+          ? {
+              id: zona.modul.id,
+              kodeIot: zona.modul.kodeIot,
+              nama: zona.modul.nama,
+              lokasi: zona.modul.lokasi,
+              status: modulStatus,
+            }
+          : null,
       },
     });
   } catch (error) {
@@ -214,6 +275,14 @@ const createZona = async (req, res, next) => {
       },
     });
 
+    await logActivity({
+      req,
+      action: "CREATE",
+      entity: "ZONA",
+      entityId: newZona.id,
+      details: `Zona '${newZona.namaZona}' (${newZona.kodeZona}) pada modul '${modul.nama}' berhasil dibuat`,
+    });
+
     res.status(201).json({
       success: true,
       message: "Zona berhasil dibuat",
@@ -275,6 +344,14 @@ const updateZona = async (req, res, next) => {
       data: updateData,
     });
 
+    await logActivity({
+      req,
+      action: "UPDATE",
+      entity: "ZONA",
+      entityId: updated.id,
+      details: `Zona '${updated.namaZona}' (${updated.kodeZona}) diperbarui`,
+    });
+
     res.status(200).json({
       success: true,
       message: "Zona berhasil diupdate",
@@ -287,7 +364,7 @@ const updateZona = async (req, res, next) => {
 
 /**
  * DELETE /api/zona/:id
- * Menghapus zona beserta data sensor & alert terkait (cascade)
+ * Soft-delete zona (set deletedAt ke waktu sekarang)
  */
 const deleteZona = async (req, res, next) => {
   try {
@@ -301,11 +378,76 @@ const deleteZona = async (req, res, next) => {
       });
     }
 
-    await prisma.zona.delete({ where: { id } });
+    if (existing.deletedAt) {
+      return res.status(400).json({
+        success: false,
+        message: `Zona '${existing.namaZona}' sudah dihapus sebelumnya`,
+      });
+    }
+
+    const deleted = await prisma.zona.update({
+      where: { id },
+      data: { deletedAt: new Date() },
+    });
+
+    await logActivity({
+      req,
+      action: "DELETE",
+      entity: "ZONA",
+      entityId: id,
+      details: `Zona '${existing.namaZona}' (${existing.kodeZona}) di-soft-delete`,
+    });
 
     res.status(200).json({
       success: true,
-      message: `Zona '${existing.namaZona}' (${id}) berhasil dihapus`,
+      message: `Zona '${existing.namaZona}' (${existing.kodeZona}) berhasil dihapus (soft delete)`,
+      data: deleted,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * PATCH /api/zona/:id/restore
+ * Memulihkan zona yang di-soft-delete
+ */
+const restoreZona = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+
+    const existing = await prisma.zona.findUnique({ where: { id } });
+    if (!existing) {
+      return res.status(404).json({
+        success: false,
+        message: `Zona dengan ID '${id}' tidak ditemukan`,
+      });
+    }
+
+    if (!existing.deletedAt) {
+      return res.status(400).json({
+        success: false,
+        message: `Zona '${existing.namaZona}' tidak dalam kondisi terhapus`,
+      });
+    }
+
+    const restored = await prisma.zona.update({
+      where: { id },
+      data: { deletedAt: null },
+    });
+
+    await logActivity({
+      req,
+      action: "RESTORE",
+      entity: "ZONA",
+      entityId: id,
+      details: `Zona '${existing.namaZona}' (${existing.kodeZona}) dipulihkan (restore)`,
+    });
+
+    res.status(200).json({
+      success: true,
+      message: `Zona '${existing.namaZona}' (${existing.kodeZona}) berhasil dipulihkan`,
+      data: restored,
     });
   } catch (error) {
     next(error);
@@ -318,4 +460,5 @@ module.exports = {
   createZona,
   updateZona,
   deleteZona,
+  restoreZona,
 };

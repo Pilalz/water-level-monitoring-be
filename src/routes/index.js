@@ -5,6 +5,9 @@ const modulRoutes = require("./modul.route");
 const zonaRoutes = require("./zona.route");
 const sensorDataRoutes = require("./sensorData.route");
 const alertLogRoutes = require("./alertLog.route");
+const authRoutes = require("./auth.route");
+const userRoutes = require("./user.route");
+const activityLogRoutes = require("./activityLog.route");
 
 const router = Router();
 
@@ -16,15 +19,22 @@ router.get("/health", (req, res) => {
     timestamp: new Date().toISOString(),
     environment: process.env.NODE_ENV || "development",
     endpoints: {
+      auth: "/api/auth",
+      user: "/api/user",
       modul: "/api/modul",
       zona: "/api/zona",
       sensorData: "/api/sensor-data",
       alerts: "/api/alerts",
+      activityLogs: "/api/activity-logs",
     },
   });
 });
 
 // Primary Domain Routes
+router.use("/auth", authRoutes);
+router.use("/user", userRoutes);
+router.use("/users", userRoutes); // Alias
+router.use("/activity-logs", activityLogRoutes);
 router.use("/modul", modulRoutes);
 router.use("/zona", zonaRoutes);
 router.use("/sensor-data", sensorDataRoutes);

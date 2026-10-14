@@ -30,8 +30,7 @@ const calculateAdemcoChecksum = (payload18) => {
     else if (char === 'B') sum += 14;
     else if (char === 'C') sum += 15;
     
-    // Perbaikan rule D=0 sesuai permintaanmu:
-    if (char === 'D') sum -= 10; // Mengoreksi D menjadi 0
+    if (char === 'D') sum -= 10;
   }
 
   const mod = sum % 15;
@@ -51,12 +50,76 @@ const parseIoTDate = (dateStr) => {
   return new Date(`${year}-${month}-${day}T${hour}:${minute}:00+07:00`);
 };
 
-// Helper 3 menghitung ketinggian
+// Helper 4 menghitung ketinggian
 function hitungKetinggianDariVoltase(zona, voltase) {
   //Level = (V − V_min) / (V_max − V_min) × H_max
   const level = ((voltase - zona.voltMin) / (zona.voltMaks - zona.voltMin)) * zona.tinggiMaks;
 
   return level;
+}
+
+// Helper 5 Format durasi elapsed time menjadi string yang human-readable.
+function formatElapsedDuration(diffSeconds) {
+  if (diffSeconds < 60) {
+    return `${diffSeconds} detik`;
+  }
+
+  const minutes = Math.floor(diffSeconds / 60);
+  const seconds = diffSeconds % 60;
+
+  if (minutes < 60) {
+    return seconds > 0 ? `${minutes} mnt ${seconds} dtk` : `${minutes} mnt`;
+  }
+
+  const hours = Math.floor(minutes / 60);
+  const remMinutes = minutes % 60;
+
+  if (hours < 24) {
+    return remMinutes > 0 ? `${hours} jam ${remMinutes} mnt` : `${hours} jam`;
+  }
+
+  const days = Math.floor(hours / 24);
+  const remHours = hours % 24;
+
+  if (days < 7) {
+    return remHours > 0 ? `${days} hari ${remHours} jam` : `${days} hari`;
+  }
+
+  const weeks = Math.floor(days / 7);
+  const remDays = days % 7;
+
+  if (weeks < 4) {
+    return remDays > 0 ? `${weeks} minggu ${remDays} hari` : `${weeks} minggu`;
+  }
+
+  const months = Math.floor(days / 30);
+  const remWeeks = Math.floor((days % 30) / 7);
+
+  if (months < 12) {
+    return remWeeks > 0 ? `${months} bulan ${remWeeks} minggu` : `${months} bulan`;
+  }
+
+  const years = Math.floor(days / 365);
+  const remMonths = Math.floor((days % 365) / 30);
+  return remMonths > 0 ? `${years} tahun ${remMonths} bulan` : `${years} tahun`;
+}
+
+// Helper 6 Hitung status koneksi perangkat IoT berdasarkan waktu terima terakhir.
+function getDeviceConnectionStatus(waktuTerima) {
+  if (!waktuTerima) {
+    return { status: 'OFFLINE', label: 'Offline', diffSeconds: null };
+  }
+
+  const diffSeconds = Math.max(0, Math.floor((Date.now() - new Date(waktuTerima).getTime()) / 1000));
+  const durationLabel = formatElapsedDuration(diffSeconds);
+
+  if (diffSeconds <= 120) {
+    return { status: 'ONLINE',   label: `Online · ${durationLabel} lalu`,   diffSeconds };
+  }
+  if (diffSeconds <= 500) {
+    return { status: 'DELAYED',  label: `Delayed · ${durationLabel} lalu`,  diffSeconds };
+  }
+  return     { status: 'OFFLINE', label: `Offline · ${durationLabel} lalu`, diffSeconds };
 }
 
 /**
@@ -114,6 +177,9 @@ const recordSensorData = async (req, res, next) => {
 
     const statusTercatat = calculateWaterStatus(ketinggian, zona);
 
+    // Set data waktu terima sistem
+    const waktuTerima = new Date();
+
     // Simpan data 
     const record = await prisma.sensorData.create({
       data: {
@@ -122,6 +188,7 @@ const recordSensorData = async (req, res, next) => {
         voltaseRaw: voltase,
         statusTercatat,
         waktuRekam: waktuRekam,
+        waktuTerima: waktuTerima,
       },
     });
 
@@ -172,15 +239,15 @@ const getSensorData = async (req, res, next) => {
     }
 
     if (startDate || endDate) {
-      where.waktuRekam = {};
-      if (startDate) where.waktuRekam.gte = new Date(startDate);
+      where.waktuTerima = {};
+      if (startDate) where.waktuTerima.gte = new Date(startDate);
       if (endDate) {
         // Jika endDate hanya tanggal YYYY-MM-DD, set ke akhir hari
         const endD = new Date(endDate);
         if (endDate.length <= 10) {
           endD.setHours(23, 59, 59, 999);
         }
-        where.waktuRekam.lte = endD;
+        where.waktuTerima.lte = endD;
       }
     }
 
@@ -193,7 +260,7 @@ const getSensorData = async (req, res, next) => {
         where,
         take,
         skip,
-        orderBy: { waktuRekam: "desc" },
+        orderBy: { waktuTerima: "desc" },
         include: {
           zona: {
             select: {
@@ -232,6 +299,7 @@ const getSensorData = async (req, res, next) => {
         voltaseRaw: r.voltaseRaw ? Number(r.voltaseRaw) : null,
         statusTercatat: r.statusTercatat,
         waktuRekam: r.waktuRekam,
+        waktuTerima: r.waktuTerima,
       };
     });
 
@@ -261,7 +329,7 @@ const getLatestSensorData = async (req, res, next) => {
     if (idZona) {
       const latest = await prisma.sensorData.findFirst({
         where: { idZona },
-        orderBy: { waktuRekam: "desc" },
+        orderBy: { waktuTerima: "desc" },
         include: {
           zona: {
             include: { modul: true },
@@ -288,6 +356,7 @@ const getLatestSensorData = async (req, res, next) => {
           voltaseRaw: latest.voltaseRaw ? Number(latest.voltaseRaw) : null,
           statusTercatat: latest.statusTercatat,
           waktuRekam: latest.waktuRekam,
+          waktuTerima: latest.waktuTerima,
         },
       });
     }
@@ -297,7 +366,7 @@ const getLatestSensorData = async (req, res, next) => {
       include: {
         modul: true,
         sensorData: {
-          orderBy: { waktuRekam: "desc" },
+          orderBy: { waktuTerima: "desc" },
           take: 1,
         },
       },
@@ -323,6 +392,7 @@ const getLatestSensorData = async (req, res, next) => {
               voltaseRaw: r.voltaseRaw ? Number(r.voltaseRaw) : null,
               statusTercatat: r.statusTercatat,
               waktuRekam: r.waktuRekam,
+              waktuTerima: r.waktuTerima,
             }
           : null,
       };
